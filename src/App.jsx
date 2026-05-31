@@ -172,12 +172,15 @@ const UNITS = ["lb","oz","个","包","瓶","ml","L","cup","g","kg","片","根","
 const CATS  = ["肉类","蔬菜","碳水","蛋奶","调料","其他"];
 const SYS   = `你是专业的川渝料理备餐规划师。两人家庭（50kg/75kg，轻中度活动），每周备餐一次冷冻存放。约束：每餐含蔬菜+肉类（禁羊肉/鱼肉）+碳水；设备：炒锅/平底锅/炖锅/高压锅/微波炉/烤箱；川渝风味；单位用美制（°F/lb/oz/cup/tbsp/tsp/inch）；只用当前库存食材。回复中文。`;
 
-// ─── Claude call ────────────────────────────────────────────────────────────────
+// ─── Backend call (Vercel serverless → Gemini) ────────────────────────────────
+// Override with VITE_API_URL if the backend lives on a different origin.
+const API_URL = import.meta.env.VITE_API_URL || "/api/chat";
+
 async function callClaude(messages, onChunk, maxTokens = 2000) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(API_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: maxTokens, system: SYS, messages, stream: true }),
+    body: JSON.stringify({ max_tokens: maxTokens, system: SYS, messages }),
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
   const reader = res.body.getReader();

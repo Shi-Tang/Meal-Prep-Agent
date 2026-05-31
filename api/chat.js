@@ -32,7 +32,12 @@ function toGeminiBody({ system, messages = [], max_tokens }) {
       role: m.role === "assistant" ? "model" : "user",
       parts: toParts(m.content),
     })),
-    generationConfig: { maxOutputTokens: max_tokens || 2000 },
+    // thinkingBudget:0 disables Gemini 2.5's internal "thinking" step, which
+    // otherwise adds several seconds of latency before any tokens stream out.
+    generationConfig: {
+      maxOutputTokens: max_tokens || 2000,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
   };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
   return body;

@@ -533,28 +533,38 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
       let filledCount = 0;
       const filledNames = new Set();
 
+      const fillSlot = (obj) => {
+        if (!obj || !obj.name || filledNames.has(obj.name)) return;
+        const slotIdx = emptySlots[filledCount];
+        if (slotIdx === undefined) return;
+        filledNames.add(obj.name);
+        filledCount++;
+        setDishes(prev => {
+          const next = [...prev];
+          next[slotIdx] = obj;
+          return next;
+        });
+      };
+
       await callClaude([{ role:"user", content:prompt }], (full) => {
         buf = full;
-        // Check each line for a complete dish JSON
+        // Check each line for a complete dish JSON. The model sometimes wraps
+        // dishes in a pretty-printed array, so tolerate a trailing comma.
         for (const line of buf.split("\n")) {
-          const t = line.trim();
+          const t = line.trim().replace(/,\s*$/, "");
           if (!t.startsWith("{") || !t.endsWith("}")) continue;
-          try {
-            const obj = JSON.parse(t);
-            if (!obj.name || filledNames.has(obj.name)) continue;
-            filledNames.add(obj.name);
-            const slotIdx = emptySlots[filledCount];
-            if (slotIdx === undefined) continue;
-            filledCount++;
-            // Write to the specific slot immediately
-            setDishes(prev => {
-              const next = [...prev];
-              next[slotIdx] = obj;
-              return next;
-            });
-          } catch {}
+          try { fillSlot(JSON.parse(t)); } catch {}
         }
       }, 1800);
+
+      // Fallback: if line-by-line streaming missed dishes (e.g. the model
+      // returned a fenced/pretty-printed JSON array instead of one dish per
+      // line), parse the full buffer once and fill any still-empty slots.
+      if (filledCount < needCount) {
+        const parsed = extractJSON(buf);
+        const arr = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+        for (const obj of arr) fillSlot(obj);
+      }
 
       // After dishes done, fetch prep notes (non-blocking, don't await for UX)
       const allNames = [...keepDishes.map(d=>d.name), ...Array.from(filledNames)];

@@ -96,7 +96,7 @@ const css = `
 
   /* ── Flip card ── */
 
-  .flip-wrap { perspective: 1000px; height: 320px; cursor: pointer; }
+  .flip-wrap { perspective: 1000px; height: 340px; cursor: pointer; }
   .flip-inner { position: relative; width: 100%; height: 100%; transition: transform .5s cubic-bezier(.4,0,.2,1); transform-style: preserve-3d; }
   .flip-wrap.flipped .flip-inner { transform: rotateY(180deg); }
   .flip-front, .flip-back { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
@@ -109,7 +109,7 @@ const css = `
   .flip-meta { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
   .flip-tag { font-size: 10px; padding: 2px 7px; border-radius: 20px; background: var(--surf2); color: var(--muted); border: 1px solid var(--border); }
   .flip-tag.device { border-color: rgba(201,160,54,.35); color: var(--gold); }
-  .flip-body { padding: 10px 14px; flex: 1; overflow: hidden; }
+  .flip-body { padding: 10px 14px; flex: 1; overflow-y: auto; min-height: 0; }
   .ing-row-f { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.8; }
   .ing-row-f:last-child { border-bottom: none; }
   .ing-name { color: var(--text); } .ing-amt { color: var(--gold); font-weight: 500; }
@@ -129,7 +129,7 @@ const css = `
   .flip-back-hdr { background: var(--acc); padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
   .flip-back-name { font-family: 'Playfair Display', serif; font-size: .9rem; color: #fff; }
   .flip-back-close { background: rgba(255,255,255,.2); border: none; color: #fff; font-size: 16px; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; flex-shrink: 0; }
-  .flip-back-body { flex: 1; overflow-y: auto; padding: 10px 14px; }
+  .flip-back-body { flex: 1; overflow-y: auto; min-height: 0; padding: 10px 14px 16px; }
   .back-label { font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--acc); margin-bottom: 5px; }
   .step-item { display: flex; gap: 7px; font-size: 11px; line-height: 1.6; margin-bottom: 5px; }
   .step-dot { width: 17px; height: 17px; background: var(--acc); border-radius: 50%; color: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px; }
@@ -200,7 +200,8 @@ const css = `
     .ing-table th:nth-child(5), .ing-table td:nth-child(5) { width: 8%; }
 
     .recipe-grid { grid-template-columns: 1fr; gap: 14px; }
-    .flip-wrap { height: 300px; }
+    .flip-wrap { height: 360px; }
+    .step-item { font-size: 12px; }
 
     input, select { font-size: 14px; }
     .btn { font-size: 13px; padding: 10px 14px; }
@@ -224,7 +225,13 @@ async function callClaude(messages, onChunk, maxTokens = 2000) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ max_tokens: maxTokens, system: SYS, messages }),
   });
-  if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.ok) {
+    // 429 = upstream rate limit (Gemini free tier ≈ 10–15 req/min). The backend
+    // already retries with backoff; if it still bubbles up, tell the user to
+    // wait rather than showing a cryptic "API 429".
+    if (res.status === 429) throw new Error("请求过于频繁，已触发接口限流，请等待约 30 秒后再试");
+    throw new Error(`服务暂时不可用（API ${res.status}），请稍后重试`);
+  }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let full = "";
@@ -282,7 +289,12 @@ function FlipCard({ dish, selected, onSelect }) {
   const [flipped,      setFlipped]      = useState(false);
   const [steps,        setSteps]        = useState([]);
   const [stepsLoading, setStepsLoading] = useState(false);
+  const [stepsError,   setStepsError]   = useState("");
   const fetchedRef = useRef(false);
+
+  // Strip a leading list marker ("1. ", "2) ", "- ", "步骤3：") from a line.
+  const cleanStepLine = (l) =>
+    l.replace(/^\s*[-*•]?\s*(?:步骤)?\s*\d+\s*[\.\)、:：]?\s*/, "").trim();
 
   const handleFlip = async (e) => {
     if (e.target.closest(".dish-check")) return;
@@ -291,20 +303,41 @@ function FlipCard({ dish, selected, onSelect }) {
     if (next && !fetchedRef.current) {
       fetchedRef.current = true;
       setStepsLoading(true);
+      setStepsError("");
       try {
-        const prompt = `为川渝菜「${dish.name}」生成备餐步骤，只返回JSON数组，不要其他文字。
+        // Ask for one step per line (instead of a JSON array) so we can render
+        // each completed line the moment it streams in — the user sees steps
+        // appear progressively within ~1–2s instead of waiting for the whole
+        // response. This is the main fix for the slow flip-to-steps loading.
+        const prompt = `为川渝菜「${dish.name}」生成备餐步骤。
 食材：${(dish.ingredients||[]).map(i=>`${i.name} ${i.amount}`).join("、")}
 设备：${dish.device}，份量：${dish.servings || "12人份"}
-["步骤1（含°F/lb/cup等美制单位）", "步骤2", ..., "最后：分装冷冻保存"]
-5-7步，具体详细。`;
-        const raw = await callClaude([{ role:"user", content:prompt }], null, 1200);
-        const arr = extractJSON(raw);
-        if (Array.isArray(arr) && arr.length) setSteps(arr);
-        else {
-          const lines = raw.split("\n").map(l => l.replace(/^\d+[\.\)]\s*/,"").trim()).filter(l => l.length > 8);
-          if (lines.length) setSteps(lines);
+要求：5-7步，每步单独一行并以序号开头（如"1. ..."），含°F/lb/cup等美制单位，最后一步为分装冷冻保存。只输出步骤行，不要标题或其他文字。`;
+
+        let committed = 0;
+        const raw = await callClaude([{ role:"user", content:prompt }], (full) => {
+          // Only commit lines already terminated by a newline, so the
+          // half-streamed final line doesn't flicker in and out.
+          const done = full.split("\n").slice(0, -1).map(cleanStepLine).filter(l => l.length > 3);
+          if (done.length > committed) {
+            committed = done.length;
+            setSteps(done);
+            setStepsLoading(false); // first step is visible → drop the spinner
+          }
+        }, 1200);
+
+        // Final flush: the last line has no trailing newline once streaming ends.
+        let finalSteps = raw.split("\n").map(cleanStepLine).filter(l => l.length > 3);
+        if (!finalSteps.length) {
+          const arr = extractJSON(raw); // tolerate a JSON-array style reply
+          if (Array.isArray(arr) && arr.length) finalSteps = arr;
         }
-      } catch {}
+        if (finalSteps.length) setSteps(finalSteps);
+        else setStepsError("步骤生成失败，请关闭后重试");
+      } catch (err) {
+        setStepsError(err.message || "步骤加载失败，请重试");
+        fetchedRef.current = false; // allow a retry on next flip
+      }
       finally { setStepsLoading(false); }
     }
   };
@@ -356,6 +389,9 @@ function FlipCard({ dish, selected, onSelect }) {
                 <div className="step-dot">{i+1}</div><div>{s}</div>
               </div>
             ))}
+            {stepsError && !stepsLoading && steps.length === 0 && (
+              <div className="error" style={{ marginTop:4 }}>❌ {stepsError}</div>
+            )}
           </div>
         </div>
       </div>

@@ -66,12 +66,32 @@ export default async function handler(req, res) {
 
   const model = process.env.GEMINI_MODEL || MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+  const payload = JSON.stringify(toGeminiBody(reqBody));
 
-  const upstream = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify(toGeminiBody(reqBody)),
-  });
+  // Gemini's free tier enforces a low requests-per-minute quota, so bursts of
+  // calls (menu + prep-notes + step lookups) can return 429. Retry transient
+  // 429/503 with exponential backoff, honoring the upstream Retry-After hint,
+  // so the client doesn't see a hard failure for a momentary rate limit.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const MAX_ATTEMPTS = 4;
+  let upstream;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    upstream = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: payload,
+    });
+
+    if (upstream.ok || (upstream.status !== 429 && upstream.status !== 503)) break;
+    if (attempt === MAX_ATTEMPTS - 1) break;
+
+    const retryAfter = parseFloat(upstream.headers.get("retry-after"));
+    const backoff = Number.isFinite(retryAfter)
+      ? retryAfter * 1000
+      : Math.min(8000, 500 * 2 ** attempt) + Math.random() * 250;
+    await upstream.body?.cancel?.().catch(() => {});
+    await sleep(backoff);
+  }
 
   // If Gemini errors, surface a non-2xx so the frontend's `if (!res.ok) throw` fires.
   if (!upstream.ok) {

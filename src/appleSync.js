@@ -1,10 +1,8 @@
-// ─── Apple 同步：把采购清单导出到 iPhone 日历 (.ics) 与提醒事项 (快捷指令) ──────────
-// 网页没有权限直接写入 iOS 的「日历」「提醒事项」，所以走两座标准桥：
-//   1) 生成符合 RFC 5545 的 .ics 文件 → iPhone Safari 下载后用「日历」打开，
-//      自动创建「去 xx 超市购物」日程，清单写在日程备注里。
-//   2) 生成 shortcuts:// 深链 → 触发用户预先配置好的「快捷指令」，
-//      把清单逐行拆成可逐项打勾的「提醒事项」。
-// 两者都无需后端、无需登录、完全离线可用。
+// ─── Apple 同步：把采购清单导出到 iPhone 日历 (.ics) ────────────────────────────────
+// 网页没有权限直接写入 iOS 的「日历」，所以走标准桥：
+// 生成符合 RFC 5545 的 .ics 文件 → iPhone Safari 下载后用「日历」打开，
+// 自动创建「去 xx 超市购物」日程，采购清单写在日程备注里。
+// 无需后端、无需登录、完全离线可用。
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
@@ -111,13 +109,6 @@ export function downloadICS(icsText, filename = "shopping.ics") {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
-}
-
-// 生成触发快捷指令的深链。input=text 时，清单整段作为快捷指令输入文本传入。
-export function buildShortcutURL(shortcutName, inputText) {
-  return `shortcuts://run-shortcut?name=${encodeURIComponent(
-    shortcutName
-  )}&input=text&text=${encodeURIComponent(inputText)}`;
 }
 
 export { WEEKDAYS };

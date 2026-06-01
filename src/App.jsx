@@ -1,10 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { lookupRecipe, RECIPE_NAMES } from "./recipes";
 import { track } from "./analytics";
-import { shoppingLines, nextOccurrence, buildICS, downloadICS, buildShortcutURL, WEEKDAYS } from "./appleSync";
-
-// 提醒事项快捷指令的名称：用户需在 iPhone「快捷指令」App 中创建同名指令（见 UI 内说明）
-const REMINDERS_SHORTCUT_NAME = "备餐采购清单";
+import { shoppingLines, nextOccurrence, buildICS, downloadICS, WEEKDAYS } from "./appleSync";
 
 // ─── Persist preference to memory (no localStorage in artifacts) ───────────────
 // favorites: 用户收藏的菜名，收藏后会在后续菜单生成中提高推送频率。
@@ -375,16 +372,13 @@ function FlipCard({ dish, favorited, onToggleFavorite }) {
   );
 }
 
-// ─── 同步到 iPhone（日历 .ics + 提醒事项快捷指令） ────────────────────────────────
+// ─── 同步到 iPhone 日历（.ics） ──────────────────────────────────────────────────
 function IphoneSync({ data }) {
   const [day, setDay]   = useState(6);      // 0=周日 … 6=周六，默认周六
   const [time, setTime] = useState("10:00"); // 默认上午 10 点
-  const [showHelp, setShowHelp] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const lines = shoppingLines(data);
   const storeName = data?.store_name || "超市";
-  const listText = lines.join("\n");
 
   const computeStart = () => {
     const [h, m] = time.split(":").map(Number);
@@ -398,26 +392,13 @@ function IphoneSync({ data }) {
     track("sync_calendar_ics", { store: storeName, items: lines.length, day, time });
   };
 
-  const handleReminders = () => {
-    track("sync_reminders_shortcut", { store: storeName, items: lines.length });
-    window.location.href = buildShortcutURL(REMINDERS_SHORTCUT_NAME, listText);
-  };
-
-  const handleCopy = async () => {
-    try { await navigator.clipboard.writeText(listText); }
-    catch { /* clipboard 不可用时忽略 */ }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
-    track("sync_copy_list", { items: lines.length });
-  };
-
   const startPreview = computeStart();
   const previewStr = `${WEEKDAYS[day]} ${time}（${startPreview.getMonth() + 1}/${startPreview.getDate()}）`;
 
   return (
     <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px dashed var(--border)" }}>
       <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "1rem", marginBottom: 10 }}>
-        📲 同步到 iPhone
+        📅 加入 iPhone 日历
       </div>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
@@ -429,44 +410,12 @@ function IphoneSync({ data }) {
         <span style={{ fontSize: 11, color: "var(--muted)" }}>→ {previewStr}</span>
       </div>
 
-      <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
-        <button className="btn btn-primary" onClick={handleCalendar} disabled={!lines.length}>
-          📅 加入日历
-        </button>
-        <button className="btn btn-ghost" onClick={handleReminders} disabled={!lines.length}>
-          ✅ 加到提醒事项
-        </button>
-        <button className="btn btn-ghost" onClick={handleCopy} disabled={!lines.length}>
-          {copied ? "✓ 已复制" : "📋 复制清单"}
-        </button>
-      </div>
-
-      <button
-        onClick={() => setShowHelp((s) => !s)}
-        style={{ background: "none", border: "none", color: "var(--acc)", fontSize: 11, cursor: "pointer", padding: "10px 0 0", fontFamily: "'DM Sans', sans-serif" }}
-      >
-        {showHelp ? "▾ 收起说明" : "▸ 首次使用：如何让「提醒事项」自动逐项打勾？"}
+      <button className="btn btn-primary" onClick={handleCalendar} disabled={!lines.length}>
+        📅 加入日历
       </button>
-
-      {showHelp && (
-        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7, marginTop: 8, padding: "12px 14px", background: "var(--surf2)", borderRadius: 8, border: "1px solid var(--border)" }}>
-          <div style={{ marginBottom: 8 }}>
-            <strong style={{ color: "var(--text)" }}>📅 加入日历</strong>：点一下会下载日历文件，iPhone 会提示用「日历」打开，自动创建「去{storeName}购物」日程（清单写在备注里，提前 1 小时提醒）。无需任何配置。
-          </div>
-          <div>
-            <strong style={{ color: "var(--text)" }}>✅ 加到提醒事项</strong>：需先在 iPhone 创建一个一次性快捷指令（约 1 分钟）：
-            <ol style={{ margin: "6px 0 0 18px", padding: 0 }}>
-              <li>打开「快捷指令」App → 右上角 ＋ 新建</li>
-              <li>命名为 <strong style={{ color: "var(--text)" }}>{REMINDERS_SHORTCUT_NAME}</strong>（必须一字不差）</li>
-              <li>加操作「<strong>从文本中拆分</strong>」→ 输入选「快捷指令输入」，分隔符选「新行」</li>
-              <li>加操作「<strong>重复 / Repeat with Each</strong>」</li>
-              <li>在重复内加「<strong>添加提醒事项</strong>」→ 内容选「重复项目 (Repeat Item)」，列表选你的购物清单</li>
-              <li>保存。以后点上方「加到提醒事项」即可一键把整张清单变成可逐项打勾的提醒。</li>
-            </ol>
-            <div style={{ marginTop: 6 }}>不想配置？直接用「📋 复制清单」，到提醒事项里粘贴也能一次生成多条。</div>
-          </div>
-        </div>
-      )}
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+        点击后 iPhone 会用「日历」打开，自动创建「去{storeName}购物」日程，采购清单写在日程备注里，提前 1 小时提醒。
+      </div>
     </div>
   );
 }

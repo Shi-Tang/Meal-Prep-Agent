@@ -217,17 +217,32 @@ const css = `
 
 const UNITS = ["lb","oz","个","包","瓶","ml","L","cup","g","kg","片","根","头","束","盒","块"];
 const CATS  = ["肉类","蔬菜","碳水","蛋奶","调料","其他"];
-const SYS   = `你是专业的川渝料理备餐规划师。两人家庭（50kg/75kg，轻中度活动），每周备餐一次冷冻存放。约束：每餐含蔬菜+肉类（禁羊肉/鱼肉）+碳水；设备：炒锅/平底锅/炖锅/高压锅/微波炉/烤箱；川渝风味；单位用美制（°F/lb/oz/cup/tbsp/tsp/inch）；只用当前库存食材。回复中文。`;
+const CUISINES = ["不限","川菜","粤菜","湘菜","鲁菜","江浙菜","东北菜","西北菜","家常菜"];
+
+// 用户可调偏好的默认值；改动会即时反映到发给模型的系统提示 / 菜单 prompt 中。
+const DEFAULT_SETTINGS = {
+  servings: 2,                 // 几人份
+  cuisine: "川菜",             // 偏好菜系（"不限" 则不限制）
+  dishCount: 3,                // 每周生成几道菜
+  restrictions: "禁羊肉、禁鱼肉", // 忌口（自由文本）
+};
+
+// 根据用户偏好动态生成系统提示。
+function buildSystem(s = DEFAULT_SETTINGS) {
+  return `你是专业的备餐规划师。${s.servings}人份家庭，每周备餐一次冷冻存放。`
+    + (s.cuisine && s.cuisine !== "不限" ? `偏好菜系：${s.cuisine}，尽量贴近该菜系的口味与做法。` : "")
+    + `约束：每餐含蔬菜+肉类（${s.restrictions?.trim() || "无特殊忌口"}）+碳水；设备：炒锅/平底锅/炖锅/高压锅/微波炉/烤箱；单位用美制（°F/lb/oz/cup/tbsp/tsp/inch）；只用当前库存食材。回复中文。`;
+}
 
 // ─── Backend call (Vercel serverless → Gemini) ────────────────────────────────
 // Override with VITE_API_URL if the backend lives on a different origin.
 const API_URL = import.meta.env.VITE_API_URL || "/api/chat";
 
-async function callClaude(messages, onChunk, maxTokens = 2000) {
+async function callClaude(messages, onChunk, maxTokens = 2000, system = buildSystem()) {
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_tokens: maxTokens, system: SYS, messages }),
+    body: JSON.stringify({ max_tokens: maxTokens, system, messages }),
   });
   if (!res.ok) {
     // 429 = upstream rate limit (Gemini free tier ≈ 10–15 req/min). The backend
@@ -461,7 +476,7 @@ function ShoppingList({ data, onConfirmPurchase }) {
       ))}
       {data.asian_store_items?.length > 0 && (
         <div>
-          <div className="asian-hdr">🏮 中超单独购买（H Mart / 99 Ranch）</div>
+          <div className="asian-hdr">🏮 亚洲超市单独购买</div>
           {data.asian_store_items.map((item,ii) => renderItem({ key:`a-${ii}`, item }))}
         </div>
       )}
@@ -483,23 +498,12 @@ function ShoppingList({ data, onConfirmPurchase }) {
 // ─── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [step, setStep] = useState(0);
-  const [ings, setIngs] = useState([
-    { id:1,  name:"鸡腿（带骨）", qty:"3",   unit:"lb",  cat:"肉类" },
-    { id:2,  name:"猪五花肉",     qty:"2",   unit:"lb",  cat:"肉类" },
-    { id:3,  name:"牛腱子肉",     qty:"1.5", unit:"lb",  cat:"肉类" },
-    { id:4,  name:"西兰花",       qty:"2",   unit:"个",  cat:"蔬菜" },
-    { id:5,  name:"土豆",         qty:"3",   unit:"个",  cat:"蔬菜" },
-    { id:6,  name:"嫩豆腐",       qty:"2",   unit:"盒",  cat:"蔬菜" },
-    { id:7,  name:"大蒜",         qty:"1",   unit:"头",  cat:"蔬菜" },
-    { id:8,  name:"生姜",         qty:"1",   unit:"块",  cat:"蔬菜" },
-    { id:9,  name:"鸡蛋",         qty:"6",   unit:"个",  cat:"蛋奶" },
-    { id:10, name:"郫县豆瓣酱",   qty:"0.5", unit:"瓶",  cat:"调料" },
-    { id:11, name:"生抽",         qty:"0.8", unit:"瓶",  cat:"调料" },
-    { id:12, name:"花椒",         qty:"20",  unit:"g",   cat:"调料" },
-    { id:13, name:"干辣椒",       qty:"30",  unit:"g",   cat:"调料" },
-    { id:14, name:"香油",         qty:"0.6", unit:"瓶",  cat:"调料" },
-  ]);
-  const [nid, setNid] = useState(20);
+  const [ings, setIngs] = useState([]);
+  const [nid, setNid] = useState(1);
+
+  // ── 用户偏好（份数 / 菜系 / 菜数 / 忌口），驱动系统提示与菜单 prompt
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const updSetting = (f, v) => setSettings(p => ({ ...p, [f]: v }));
 
   // Receipt scan state
   const [receiptLoading,  setReceiptLoading]  = useState(false);
@@ -574,7 +578,11 @@ export default function App() {
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
           { type: "text", text: `识别这张超市小票中的所有食材和商品，只返回JSON数组，不要其他文字。
-每项格式：{"name":"商品名（中文）","qty":数量数字,"unit":"单位","cat":"肉类/蔬菜/碳水/蛋奶/调料/其他"}
+每项格式：{"name":"商品名","qty":数量数字,"unit":"单位","cat":"肉类/蔬菜/碳水/蛋奶/调料/其他"}
+商品名语言规则（严格遵守，按小票上该商品的实际显示语言）：
+- 该商品在小票上只用英文显示 → name 用英文（保持小票原文，可适当规范大小写）
+- 该商品在小票上只用中文显示 → name 用中文
+- 该商品在小票上同时有中英文（双语）→ name 用中文
 单位从以下选：lb/oz/个/包/瓶/ml/L/cup/g/kg/片/根/头/束/盒/块
 如果看不清数量就默认1，单位根据商品合理推断，非食品类商品忽略。` }
         ]
@@ -625,26 +633,29 @@ export default function App() {
     setMenuDone(false);
     setMenuError("");
 
-    // Always regenerate all three slots from scratch.
-    setDishes([null, null, null]);
-    const needCount = 3;
-    const emptySlots = [0, 1, 2];
+    // Always regenerate all slots from scratch (count driven by user setting).
+    const needCount = Math.max(1, Number(settings.dishCount) || 3);
+    const emptySlots = Array.from({ length: needCount }, (_, i) => i);
+    setDishes(Array(needCount).fill(null));
 
     const prefCtx = favorites.length
       ? `用户收藏的菜（请显著提高推送频率，在库存允许时尽量优先安排其中的菜）：${favorites.slice(-12).join("、")}`
       : "";
 
-    const prompt = `根据食材库存规划川渝备餐，只输出 ${needCount} 行JSON，每行一道菜，不要任何其他文字。
-${prefCtx ? `偏好约束：${prefCtx}` : ""}
+    const cuisineCtx = settings.cuisine && settings.cuisine !== "不限"
+      ? `偏好菜系：${settings.cuisine}。` : "";
+
+    const prompt = `根据食材库存规划备餐，只输出 ${needCount} 行JSON，每行一道菜，不要任何其他文字。
+${cuisineCtx}${prefCtx ? `偏好约束：${prefCtx}` : ""}
 【食材库存】${ingStr || "（无）"}
 
 【已收录做法的菜品】${RECIPE_NAMES.join("、")}
-要求：在库存食材允许的前提下，尽量从上面【已收录做法的菜品】中选择，菜名需与列表完全一致；只有当库存确实无法做出列表中任何菜时，才另选其他川渝菜。
+要求：在库存食材允许的前提下，尽量从上面【已收录做法的菜品】中选择，菜名需与列表完全一致；只有当库存确实无法做出列表中任何菜时，才另选其他菜。
 
 每行格式（单行紧凑JSON）：
-{"name":"水煮牛肉","name_en":"Sichuan Boiled Beef","device":"炒锅","time":"约30分钟","servings":"12人份","ingredients":[{"name":"牛里脊","amount":"2.5 lbs"},{"name":"郫县豆瓣酱","amount":"3 tbsp"}]}
+{"name":"水煮牛肉","name_en":"Sichuan Boiled Beef","device":"炒锅","time":"约30分钟","servings":"${settings.servings}人份","ingredients":[{"name":"牛里脊","amount":"2.5 lbs"},{"name":"郫县豆瓣酱","amount":"3 tbsp"}]}
 
-规则：禁羊肉/鱼肉，只用库存食材，用量用美制单位，每行必须是完整合法JSON。`;
+规则：忌口（${settings.restrictions?.trim() || "无"}），按 ${settings.servings} 人份用量，只用库存食材，用量用美制单位，每行必须是完整合法JSON。`;
 
     try {
       let buf = "";
@@ -673,7 +684,7 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
           if (!t.startsWith("{") || !t.endsWith("}")) continue;
           try { fillSlot(JSON.parse(t)); } catch {}
         }
-      }, 1800);
+      }, 1800, buildSystem(settings));
 
       // Fallback: if line-by-line streaming missed dishes (e.g. the model
       // returned a fenced/pretty-printed JSON array instead of one dish per
@@ -696,7 +707,7 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
       setMenuLoading(false);
       setMenuDone(true);
     }
-  }, [ingStr, favorites]);
+  }, [ingStr, favorites, settings]);
 
   // ── Confirm this week's menu and move on to shopping
   const confirmMenu = () => {
@@ -733,16 +744,16 @@ ${ingStr || "（已清空）"}
 }
 \`\`\`
 
-Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推荐覆盖最广的一家。`;
+Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市。推荐覆盖最广的一家。`;
       let raw = "";
-      await callClaude([{ role:"user", content:prompt }], t => { raw = t; }, 3000);
+      await callClaude([{ role:"user", content:prompt }], t => { raw = t; }, 3000, buildSystem(settings));
       const parsed = extractJSON(raw);
       if (!parsed) throw new Error("解析失败，请重试");
       track("shopping_generated", { store: parsed.store_name });
       setShopData(parsed);
-    } catch(e) { track("shopping_generate_failed", { message: e.message }); setShopError(e.message); }
+    }     catch(e) { track("shopping_generate_failed", { message: e.message }); setShopError(e.message); }
     finally { setShopLoading(false); }
-  }, [ingStr, dishes]);
+  }, [ingStr, dishes, settings]);
 
   // ── Confirm purchase
   const confirmPurchase = useCallback((purchasedItems) => {
@@ -777,7 +788,6 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
       <div className="app">
 
         <div className="hdr">
-          <div className="hdr-tag">川渝风味 · 每周备餐</div>
           <h1>备餐 <span>规划师</span></h1>
           <div className="hdr-sub">智能菜单 · 营养均衡 · 超市采购一站搞定</div>
         </div>
@@ -795,6 +805,37 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
         {/* ════ Step 0: Ingredients ════ */}
         {step === 0 && (
           <>
+            {/* Preferences */}
+            <div className="card">
+              <div className="card-title"><span className="ico">⚙️</span>备餐偏好设置</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:12 }}>
+                <label style={{ display:"block" }}>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginBottom:5 }}>几人份</div>
+                  <input type="number" min="1" step="1" value={settings.servings}
+                    onChange={e => updSetting("servings", e.target.value)} />
+                </label>
+                <label style={{ display:"block" }}>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginBottom:5 }}>菜系</div>
+                  <select value={settings.cuisine} onChange={e => updSetting("cuisine", e.target.value)}>
+                    {CUISINES.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </label>
+                <label style={{ display:"block" }}>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginBottom:5 }}>每周菜品数</div>
+                  <input type="number" min="1" max="9" step="1" value={settings.dishCount}
+                    onChange={e => updSetting("dishCount", e.target.value)} />
+                </label>
+                <label style={{ display:"block" }}>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginBottom:5 }}>忌口</div>
+                  <input value={settings.restrictions} placeholder="如：禁羊肉、禁鱼肉"
+                    onChange={e => updSetting("restrictions", e.target.value)} />
+                </label>
+              </div>
+              <div style={{ fontSize:11, color:"var(--muted)", marginTop:10 }}>
+                这些设置会影响菜单生成与采购建议，可随时调整后重新生成菜单。
+              </div>
+            </div>
+
             {/* Receipt scan */}
             <div className="card">
               <div className="card-title"><span className="ico">🧾</span>拍照导入小票</div>
@@ -853,7 +894,16 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
                   </tr>
                 </thead>
                 <tbody>
-                  {ings.map(row => (
+                  {ings.length === 0 ? (
+                    <tr>
+                      <td colSpan={5}>
+                        <div className="empty" style={{ padding:"18px 0" }}>
+                          <div className="empty-ico">🥕</div>
+                          暂无食材，可拍照导入小票，或点下方「+ 添加一行」手动录入
+                        </div>
+                      </td>
+                    </tr>
+                  ) : ings.map(row => (
                     <tr key={row.id}>
                       <td><input value={row.name} onChange={e=>upd(row.id,"name",e.target.value)} placeholder="鸡腿、豆瓣酱..." /></td>
                       <td><input value={row.qty}  onChange={e=>upd(row.id,"qty",e.target.value)}  type="number" min="0" step="0.1" /></td>
@@ -920,11 +970,11 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
               )}
             </div>
 
-            {/* Confirm bar — only show when all 3 dishes loaded */}
-            {dishes.filter(Boolean).length === 3 && !menuLoading && (
+            {/* Confirm bar — only show when all requested dishes loaded */}
+            {dishes.length > 0 && dishes.every(Boolean) && !menuLoading && (
               <div className="confirm-bar">
                 <div className="confirm-bar-info">
-                  <strong>本周 3 道菜已就绪</strong>
+                  <strong>本周 {dishes.length} 道菜已就绪</strong>
                   <span style={{ color:"var(--muted)" }}>  —— 点 ♥ 收藏喜欢的菜，以后会更常推荐</span>
                 </div>
                 <button className="btn btn-primary" disabled={menuLoading} onClick={confirmMenu}>
@@ -935,7 +985,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
 
             <div className="btn-row">
               <button className="btn btn-ghost" onClick={() => setStep(0)}>← 修改食材</button>
-              {dishes.filter(Boolean).length === 3 && !menuLoading && (
+              {dishes.length > 0 && dishes.every(Boolean) && !menuLoading && (
                 <button className="btn btn-ghost" onClick={() => generateMenu()}>🔄 重新生成菜单</button>
               )}
             </div>

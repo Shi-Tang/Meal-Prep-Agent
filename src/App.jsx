@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { lookupRecipe, RECIPE_NAMES } from "./recipes";
+import { track } from "./analytics";
 
 // ─── Persist preference to memory (no localStorage in artifacts) ───────────────
 const prefStore = { liked: [], disliked: [] };
@@ -133,6 +135,8 @@ const css = `
   .flip-back-close { background: rgba(255,255,255,.2); border: none; color: #fff; font-size: 16px; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; flex-shrink: 0; }
   .flip-back-body { flex: 1; overflow-y: auto; min-height: 0; padding: 10px 14px 16px; }
   .back-label { font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--acc); margin-bottom: 5px; }
+  .recipe-ing { font-size: 11px; color: var(--text); line-height: 1.6; margin-bottom: 4px; }
+  .recipe-prep { font-size: 11px; color: var(--muted); line-height: 1.6; margin-bottom: 3px; padding-left: 8px; border-left: 2px solid var(--border); }
   .step-item { display: flex; gap: 7px; font-size: 11px; line-height: 1.6; margin-bottom: 5px; }
   .step-dot { width: 17px; height: 17px; background: var(--acc); border-radius: 50%; color: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px; }
 
@@ -288,70 +292,18 @@ function SkeletonCard() {
 
 // ─── Flip Card ──────────────────────────────────────────────────────────────────
 function FlipCard({ dish, selected, onSelect }) {
-  const [flipped,      setFlipped]      = useState(false);
-  const [steps,        setSteps]        = useState([]);
-  const [stepsLoading, setStepsLoading] = useState(false);
-  const [stepsError,   setStepsError]   = useState("");
-  const fetchedRef = useRef(false);
+  const [flipped, setFlipped] = useState(false);
 
-  // Strip a leading list marker ("1. ", "2) ", "- ", "步骤3：") from a line.
-  const cleanStepLine = (l) =>
-    l.replace(/^\s*[-*•]?\s*(?:步骤)?\s*\d+\s*[\.\)、:：]?\s*/, "").trim();
-
-  const loadSteps = useCallback(async () => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-    setStepsLoading(true);
-    setStepsError("");
-    try {
-      // Ask for one step per line (instead of a JSON array) so we can render
-      // each completed line the moment it streams in — the user sees steps
-      // appear progressively within ~1–2s instead of waiting for the whole
-      // response. This is the main fix for the slow flip-to-steps loading.
-      const prompt = `为川渝菜「${dish.name}」生成备餐步骤。
-食材：${(dish.ingredients||[]).map(i=>`${i.name} ${i.amount}`).join("、")}
-设备：${dish.device}，份量：${dish.servings || "12人份"}
-要求：5-7步，每步单独一行并以序号开头（如"1. ..."），含°F/lb/cup等美制单位，最后一步为分装冷冻保存。只输出步骤行，不要标题或其他文字。`;
-
-      let committed = 0;
-      const raw = await callClaude([{ role:"user", content:prompt }], (full) => {
-        // Only commit lines already terminated by a newline, so the
-        // half-streamed final line doesn't flicker in and out.
-        const done = full.split("\n").slice(0, -1).map(cleanStepLine).filter(l => l.length > 3);
-        if (done.length > committed) {
-          committed = done.length;
-          setSteps(done);
-          setStepsLoading(false); // first step is visible → drop the spinner
-        }
-      }, 1200);
-
-      // Final flush: the last line has no trailing newline once streaming ends.
-      let finalSteps = raw.split("\n").map(cleanStepLine).filter(l => l.length > 3);
-      if (!finalSteps.length) {
-        const arr = extractJSON(raw); // tolerate a JSON-array style reply
-        if (Array.isArray(arr) && arr.length) finalSteps = arr.filter(x => typeof x === "string" && x.trim());
-      }
-      if (finalSteps.length) { setSteps(finalSteps); setStepsError(""); }
-      else { setStepsError("步骤生成失败，点击下方重试"); fetchedRef.current = false; }
-    } catch (err) {
-      // Network error / rate-limit / server overload — keep the card retryable.
-      setStepsError(err.message ? `加载失败：${err.message}` : "加载失败，点击下方重试");
-      fetchedRef.current = false;
-    } finally { setStepsLoading(false); }
-  }, [dish]);
-
-  const retrySteps = (e) => {
-    e.stopPropagation();
-    fetchedRef.current = false;
-    setSteps([]);
-    loadSteps();
-  };
+  // Recipe is read straight from the local recipe database — no API call,
+  // so flipping never hits the backend / rate limit.
+  const recipe = lookupRecipe(dish.name);
 
   const handleFlip = (e) => {
     if (e.target.closest(".dish-check")) return;
-    const next = !flipped;
-    setFlipped(next);
-    if (next && !fetchedRef.current && steps.length === 0) loadSteps();
+    setFlipped(f => {
+      if (!f) track("recipe_steps_view", { dish: dish.name, has_steps: !!recipe });
+      return !f;
+    });
   };
 
   return (
@@ -381,7 +333,7 @@ function FlipCard({ dish, selected, onSelect }) {
               </div>
             ))}
           </div>
-          <div className="flip-hint">点击查看做法 ↗</div>
+          <div className="flip-hint">{recipe ? "点击查看做法 ↗" : "📖 暂无做法记录"}</div>
         </div>
         {/* Back */}
         <div className="flip-back" onClick={e => e.stopPropagation()}>
@@ -390,22 +342,28 @@ function FlipCard({ dish, selected, onSelect }) {
             <button className="flip-back-close">×</button>
           </div>
           <div className="flip-back-body">
-            <div className="back-label">详细步骤</div>
-            {stepsLoading && (
-              <div style={{ display:"flex", alignItems:"center", gap:8, padding:"16px 0", color:"var(--muted)", fontSize:12 }}>
-                <div className="spinner" style={{ width:20, height:20, borderWidth:2 }} />加载中...
-              </div>
-            )}
-            {steps.map((s,i) => (
-              <div key={i} className="step-item">
-                <div className="step-dot">{i+1}</div><div>{s}</div>
-              </div>
-            ))}
-            {stepsError && !stepsLoading && steps.length === 0 && (
-              <div style={{ marginTop:4 }}>
-                <div className="error">❌ {stepsError}</div>
-                <button className="btn btn-ghost" style={{ marginTop:10, width:"100%", justifyContent:"center" }}
-                  onClick={retrySteps}>🔄 重新加载做法</button>
+            {recipe ? (
+              <>
+                {recipe.ingredients && (
+                  <>
+                    <div className="back-label">用料</div>
+                    <div className="recipe-ing">{recipe.ingredients}</div>
+                    {(recipe.prep || []).map((p,i) => (
+                      <div key={i} className="recipe-prep">{p}</div>
+                    ))}
+                  </>
+                )}
+                <div className="back-label" style={{ marginTop: recipe.ingredients ? 12 : 0 }}>做法</div>
+                {recipe.steps.map((s,i) => (
+                  <div key={i} className="step-item">
+                    <div className="step-dot">{i+1}</div><div>{s}</div>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="empty" style={{ padding:"20px 0" }}>
+                <div className="empty-ico">📖</div>
+                该菜暂无做法记录
               </div>
             )}
           </div>
@@ -577,12 +535,14 @@ export default function App() {
       }], null, 1500);
       const arr = extractJSON(raw);
       if (!Array.isArray(arr) || arr.length === 0) throw new Error("未识别到食材，请检查小票图片是否清晰");
+      track("receipt_scanned", { items_detected: arr.length });
       setReceiptItems(arr);
       // default: all checked
       const initChecked = {};
       arr.forEach((_, i) => { initChecked[i] = true; });
       setReceiptChecked(initChecked);
     } catch(e) {
+      track("receipt_scan_failed", { message: e.message });
       setReceiptError(e.message);
     } finally {
       setReceiptLoading(false);
@@ -593,6 +553,7 @@ export default function App() {
     const toAdd = receiptItems
       .filter((_, i) => receiptChecked[i])
       .map((item, i) => ({ ...item, cat: receiptCats[i] || item.cat || "其他" }));
+    track("receipt_imported", { items_imported: toAdd.length });
     setIngs(prev => {
       let updated = [...prev];
       let nextId = Math.max(...prev.map(r => r.id), nid) + 1;
@@ -612,6 +573,8 @@ export default function App() {
 
   // ── Generate menu: single streaming request, fill slots as each line arrives
   const generateMenu = useCallback(async (keepDishes = []) => {
+    const startedAt = Date.now();
+    track("menu_generate_started", { ingredient_count: ingCount, kept_dishes: keepDishes.length });
     setMenuLoading(true);
     setMenuDone(false);
     setMenuError("");
@@ -638,6 +601,9 @@ export default function App() {
     const prompt = `根据食材库存规划川渝备餐，只输出 ${needCount} 行JSON，每行一道菜，不要任何其他文字。
 ${prefCtx ? `偏好约束：${prefCtx}` : ""}
 【食材库存】${ingStr || "（无）"}
+
+【已收录做法的菜品】${RECIPE_NAMES.join("、")}
+要求：在库存食材允许的前提下，尽量从上面【已收录做法的菜品】中选择，菜名需与列表完全一致；只有当库存确实无法做出列表中任何菜时，才另选其他川渝菜。
 
 每行格式（单行紧凑JSON）：
 {"name":"水煮牛肉","name_en":"Sichuan Boiled Beef","device":"炒锅","time":"约30分钟","servings":"12人份","ingredients":[{"name":"牛里脊","amount":"2.5 lbs"},{"name":"郫县豆瓣酱","amount":"3 tbsp"}]}
@@ -682,6 +648,12 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
         for (const obj of arr) fillSlot(obj);
       }
 
+      track("menu_generated", {
+        dishes_count: keepDishes.length + filledCount,
+        new_dishes: filledCount,
+        duration_ms: Date.now() - startedAt,
+      });
+
       // After dishes done, fetch prep notes (non-blocking, don't await for UX)
       const allNames = [...keepDishes.map(d=>d.name), ...Array.from(filledNames)];
       if (allNames.length > 0) {
@@ -700,6 +672,7 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
       }
 
     } catch(e) {
+      track("menu_generate_failed", { message: e.message });
       setMenuError(e.message);
     } finally {
       setMenuLoading(false);
@@ -710,6 +683,7 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
   // ── Confirm dish selection
   const confirmSelection = () => {
     if (selected.size === 0) return;
+    track("dishes_confirmed", { selected_count: selected.size, dishes: Array.from(selected) });
     const newLiked    = [...new Set([...liked,    ...Array.from(selected)])];
     const newDisliked = [...new Set([...disliked, ...dishes.filter(d => !selected.has(d.name)).map(d => d.name)])];
     setLiked(newLiked);
@@ -729,6 +703,7 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
 
   // ── Generate shopping list
   const generateShopping = useCallback(async () => {
+    track("shopping_generate_started");
     setShopLoading(true); setShopError(""); setShopData(null);
     try {
       const dishSummary = dishes.map(d => `${d.name}：${(d.ingredients||[]).map(i=>`${i.name} ${i.amount}`).join("、")}`).join("\n");
@@ -758,13 +733,15 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
       await callClaude([{ role:"user", content:prompt }], t => { raw = t; }, 3000);
       const parsed = extractJSON(raw);
       if (!parsed) throw new Error("解析失败，请重试");
+      track("shopping_generated", { store: parsed.store_name });
       setShopData(parsed);
-    } catch(e) { setShopError(e.message); }
+    } catch(e) { track("shopping_generate_failed", { message: e.message }); setShopError(e.message); }
     finally { setShopLoading(false); }
   }, [ingStr, dishes]);
 
   // ── Confirm purchase
   const confirmPurchase = useCallback((purchasedItems) => {
+    track("purchase_confirmed", { items_count: purchasedItems.length });
     setIngs(prev => {
       let updated = [...prev];
       let nextId = Math.max(...prev.map(r => r.id), nid) + 1;
@@ -802,7 +779,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
           {[{l:"食材库存",i:"🥕"},{l:"菜单食谱",i:"🍳"},{l:"采购清单",i:"🛒"}].map((s,idx) => (
             <button key={idx}
               className={`step-btn ${step===idx?"active":""} ${(idx===1&&menuDone)||(idx===2&&shopData)?"done":""}`}
-              onClick={() => setStep(idx)}>
+              onClick={() => { track("step_nav", { from: step, to: idx, label: s.l }); setStep(idx); }}>
               <span className="step-num">{idx+1}</span>{s.i} {s.l}
             </button>
           ))}

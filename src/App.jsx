@@ -720,7 +720,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
             {/* Receipt scan */}
             <div className="card">
               <div className="card-title"><span className="ico">🧾</span>拍照导入小票</div>
-              <div className="upload-zone" onClick={() => fileRef.current?.click()}>
+              <div className="upload-zone">
                 <input ref={fileRef} type="file" accept="image/*" onChange={e => { const f = e.target.files[0]; e.target.value = ""; scanReceipt(f); }} />
                 {receiptLoading
                   ? <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:10 }}>

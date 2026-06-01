@@ -3,7 +3,8 @@ import { lookupRecipe, RECIPE_NAMES } from "./recipes";
 import { track } from "./analytics";
 
 // ─── Persist preference to memory (no localStorage in artifacts) ───────────────
-const prefStore = { liked: [], disliked: [] };
+// favorites: 用户收藏的菜名，收藏后会在后续菜单生成中提高推送频率。
+const prefStore = { favorites: [] };
 
 // ─── Styles ────────────────────────────────────────────────────────────────────
 const css = `
@@ -103,7 +104,7 @@ const css = `
   .flip-wrap.flipped .flip-inner { transform: rotateY(180deg); }
   .flip-front, .flip-back { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
   .flip-front { background: var(--surf); display: flex; flex-direction: column; transition: border-color .2s; position: absolute; }
-  .flip-front.selected { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+  .flip-front.favorited { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
 
   .flip-front-top { padding: 14px 14px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .flip-name { font-family: 'Playfair Display', serif; font-size: 1.05rem; color: var(--acc); line-height: 1.2; }
@@ -117,12 +118,12 @@ const css = `
   .ing-name { color: var(--text); } .ing-amt { color: var(--gold); font-weight: 500; }
   .flip-hint { padding: 6px 14px; font-size: 10px; color: var(--muted); text-align: right; border-top: 1px solid var(--border); flex-shrink: 0; }
 
-  /* Select checkbox */
-  .dish-check { position: absolute; top: 10px; right: 10px; width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--border); background: var(--surf); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s; z-index: 2; font-size: 12px; color: transparent; }
-  .dish-check:hover { border-color: var(--green); }
-  .dish-check.on { background: var(--green); border-color: var(--green); color: #fff; }
-  /* Hide the front checkbox once flipped so it can't bleed through onto the back header (iOS backface bug) */
-  .flip-wrap.flipped .dish-check { opacity: 0; pointer-events: none; }
+  /* Favorite (收藏) toggle */
+  .fav-btn { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; border-radius: 50%; border: none; background: rgba(255,255,255,.92); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s; z-index: 2; font-size: 15px; line-height: 1; color: var(--muted); box-shadow: var(--shadow); }
+  .fav-btn:hover { color: var(--red); transform: scale(1.1); }
+  .fav-btn.on { color: var(--red); }
+  /* Hide the front button once flipped so it can't bleed through onto the back header (iOS backface bug) */
+  .flip-wrap.flipped .fav-btn { opacity: 0; pointer-events: none; }
 
   /* Skel */
   .skel { background: linear-gradient(90deg, var(--surf2) 25%, var(--border) 50%, var(--surf2) 75%); background-size: 200% 100%; animation: skel-shine 1.2s infinite; border-radius: 4px; }
@@ -291,7 +292,7 @@ function SkeletonCard() {
 }
 
 // ─── Flip Card ──────────────────────────────────────────────────────────────────
-function FlipCard({ dish, selected, onSelect }) {
+function FlipCard({ dish, favorited, onToggleFavorite }) {
   const [flipped, setFlipped] = useState(false);
 
   // Recipe is read straight from the local recipe database — no API call,
@@ -299,7 +300,7 @@ function FlipCard({ dish, selected, onSelect }) {
   const recipe = lookupRecipe(dish.name);
 
   const handleFlip = (e) => {
-    if (e.target.closest(".dish-check")) return;
+    if (e.target.closest(".fav-btn")) return;
     setFlipped(f => {
       if (!f) track("recipe_steps_view", { dish: dish.name, has_steps: !!recipe });
       return !f;
@@ -310,12 +311,13 @@ function FlipCard({ dish, selected, onSelect }) {
     <div className={`flip-wrap ${flipped ? "flipped" : ""}`} onClick={handleFlip}>
       <div className="flip-inner">
         {/* Front */}
-        <div className={`flip-front ${selected ? "selected" : ""}`}>
-          {/* Checkbox in top-right corner */}
-          <div className={`dish-check ${selected ? "on" : ""}`}
-            onClick={e => { e.stopPropagation(); onSelect(); }}>
-            {selected && "✓"}
-          </div>
+        <div className={`flip-front ${favorited ? "favorited" : ""}`}>
+          {/* Favorite (收藏) toggle in top-right corner */}
+          <button type="button" className={`fav-btn ${favorited ? "on" : ""}`}
+            title={favorited ? "已收藏 · 以后会更常推荐" : "收藏 · 提高推荐频率"}
+            onClick={e => { e.stopPropagation(); onToggleFavorite(); }}>
+            {favorited ? "♥" : "♡"}
+          </button>
           <div className="flip-front-top">
             <div className="flip-name">{dish.name}</div>
             {dish.name_en && <div className="flip-name-en">{dish.name_en}</div>}
@@ -465,11 +467,9 @@ export default function App() {
   const [menuError,   setMenuError]   = useState("");
   const [dishes,      setDishes]      = useState([]);   // length-3 array; null = loading slot
   const [prepNotes,   setPrepNotes]   = useState([]);
-  const [selected,    setSelected]    = useState(new Set()); // dish names user picked
 
-  // Preference memory (in-session)
-  const [liked,    setLiked]    = useState(prefStore.liked);
-  const [disliked, setDisliked] = useState(prefStore.disliked);
+  // Preference memory (in-session): 收藏的菜名，提高后续推送频率
+  const [favorites, setFavorites] = useState(prefStore.favorites);
 
   // Shopping state
   const [shopLoading, setShopLoading] = useState(false);
@@ -572,31 +572,22 @@ export default function App() {
   };
 
   // ── Generate menu: single streaming request, fill slots as each line arrives
-  const generateMenu = useCallback(async (keepDishes = []) => {
+  const generateMenu = useCallback(async () => {
     const startedAt = Date.now();
-    track("menu_generate_started", { ingredient_count: ingCount, kept_dishes: keepDishes.length });
+    track("menu_generate_started", { ingredient_count: ingCount, favorites_count: favorites.length });
     setMenuLoading(true);
     setMenuDone(false);
     setMenuError("");
     setPrepNotes([]);
-    setSelected(new Set());
 
-    // Pre-fill slots: kept dishes in place, null for new ones
-    const slots = [null, null, null];
-    keepDishes.forEach((d, i) => { if (i < 3) slots[i] = d; });
-    setDishes([...slots]);
+    // Always regenerate all three slots from scratch.
+    setDishes([null, null, null]);
+    const needCount = 3;
+    const emptySlots = [0, 1, 2];
 
-    const needCount = 3 - keepDishes.length;
-    if (needCount === 0) { setMenuLoading(false); setMenuDone(true); return; }
-
-    const prefCtx = [
-      liked.length    ? `喜欢（优先）：${liked.slice(-8).join("、")}` : "",
-      disliked.length ? `不喜欢（避免）：${disliked.slice(-12).join("、")}` : "",
-      keepDishes.length ? `已保留（不要重复）：${keepDishes.map(d=>d.name).join("、")}` : "",
-    ].filter(Boolean).join("；");
-
-    // Which slots need filling
-    const emptySlots = slots.map((d, i) => d === null ? i : -1).filter(i => i >= 0);
+    const prefCtx = favorites.length
+      ? `用户收藏的菜（请显著提高推送频率，在库存允许时尽量优先安排其中的菜）：${favorites.slice(-12).join("、")}`
+      : "";
 
     const prompt = `根据食材库存规划川渝备餐，只输出 ${needCount} 行JSON，每行一道菜，不要任何其他文字。
 ${prefCtx ? `偏好约束：${prefCtx}` : ""}
@@ -649,13 +640,12 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
       }
 
       track("menu_generated", {
-        dishes_count: keepDishes.length + filledCount,
-        new_dishes: filledCount,
+        dishes_count: filledCount,
         duration_ms: Date.now() - startedAt,
       });
 
       // After dishes done, fetch prep notes (non-blocking, don't await for UX)
-      const allNames = [...keepDishes.map(d=>d.name), ...Array.from(filledNames)];
+      const allNames = Array.from(filledNames);
       if (allNames.length > 0) {
         callClaude([{ role:"user", content:
           `针对菜肴「${allNames.join("、")}」，列出备餐前必须提前做的操作（只写：解冻/泡血水/腌制/预热烤箱），若无则返回[]。
@@ -678,27 +668,14 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
       setMenuLoading(false);
       setMenuDone(true);
     }
-  }, [ingStr, liked, disliked]);
+  }, [ingStr, favorites]);
 
-  // ── Confirm dish selection
-  const confirmSelection = () => {
-    if (selected.size === 0) return;
-    track("dishes_confirmed", { selected_count: selected.size, dishes: Array.from(selected) });
-    const newLiked    = [...new Set([...liked,    ...Array.from(selected)])];
-    const newDisliked = [...new Set([...disliked, ...dishes.filter(d => !selected.has(d.name)).map(d => d.name)])];
-    setLiked(newLiked);
-    setDisliked(newDisliked);
-    prefStore.liked    = newLiked;
-    prefStore.disliked = newDisliked;
-
-    if (selected.size < 3) {
-      // Pass the full dish objects for kept dishes, so they can be pre-populated
-      const keepDishes = dishes.filter(d => selected.has(d.name));
-      generateMenu(keepDishes);
-    } else {
-      setStep(2);
-      generateShopping();
-    }
+  // ── Confirm this week's menu and move on to shopping
+  const confirmMenu = () => {
+    if (dishes.filter(Boolean).length === 0) return;
+    track("dishes_confirmed", { dishes: dishes.filter(Boolean).map(d => d.name), favorites_count: favorites.length });
+    setStep(2);
+    generateShopping();
   };
 
   // ── Generate shopping list
@@ -757,11 +734,13 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
     });
   }, [nid]);
 
-  // ── Toggle dish selection
-  const toggleDish = (name) => setSelected(prev => {
-    const s = new Set(prev);
-    s.has(name) ? s.delete(name) : s.add(name);
-    return s;
+  // ── Toggle a dish as favorite (boosts future recommendation frequency)
+  const toggleFavorite = (name) => setFavorites(prev => {
+    const exists = prev.includes(name);
+    const next = exists ? prev.filter(n => n !== name) : [...prev, name];
+    prefStore.favorites = next;
+    track(exists ? "dish_unfavorited" : "dish_favorited", { dish: name, favorites_count: next.length });
+    return next;
   });
 
   return (
@@ -887,10 +866,9 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
               <div className="card-title">
                 <span className="ico">🍳</span>
                 <span>本周菜肴</span>
-                {(liked.length > 0 || disliked.length > 0) && (
+                {favorites.length > 0 && (
                   <div style={{ marginLeft:"auto", display:"flex", gap:5, flexWrap:"wrap" }}>
-                    {liked.slice(-3).map(n => <span key={n} className="pref-chip like">❤ {n}</span>)}
-                    {disliked.slice(-2).map(n => <span key={n} className="pref-chip dislike">✕ {n}</span>)}
+                    {favorites.slice(-4).map(n => <span key={n} className="pref-chip like">♥ {n}</span>)}
                   </div>
                 )}
               </div>
@@ -899,7 +877,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
                 <div className="recipe-grid">
                   {dishes.map((d, i) =>
                     d
-                      ? <FlipCard key={d.name || i} dish={d} selected={selected.has(d.name)} onSelect={() => toggleDish(d.name)} />
+                      ? <FlipCard key={d.name || i} dish={d} favorited={favorites.includes(d.name)} onToggleFavorite={() => toggleFavorite(d.name)} />
                       : <SkeletonCard key={`sk-${i}`} />
                   )}
                 </div>
@@ -932,25 +910,20 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
             {dishes.filter(Boolean).length === 3 && !menuLoading && (
               <div className="confirm-bar">
                 <div className="confirm-bar-info">
-                  <strong>已选 {selected.size} / 3 道菜</strong>
-                  {selected.size > 0 && selected.size < 3 && (
-                    <span style={{ color:"var(--muted)" }}>  —— 确认后将自动替换未选菜肴</span>
-                  )}
-                  {selected.size === 3 && (
-                    <span style={{ color:"var(--green)" }}>  —— 完美！进入采购清单</span>
-                  )}
+                  <strong>本周 3 道菜已就绪</strong>
+                  <span style={{ color:"var(--muted)" }}>  —— 点 ♥ 收藏喜欢的菜，以后会更常推荐</span>
                 </div>
-                <div style={{ display:"flex", gap:8 }}>
-                  <button className="btn btn-ghost" onClick={() => generateMenu()} disabled={menuLoading}>🔄 全部重换</button>
-                  <button className="btn btn-primary" disabled={selected.size===0 || menuLoading} onClick={confirmSelection}>
-                    {selected.size === 3 ? "🛒 去采购 →" : "✓ 确认选择"}
-                  </button>
-                </div>
+                <button className="btn btn-primary" disabled={menuLoading} onClick={confirmMenu}>
+                  🛒 去采购 →
+                </button>
               </div>
             )}
 
             <div className="btn-row">
               <button className="btn btn-ghost" onClick={() => setStep(0)}>← 修改食材</button>
+              {dishes.filter(Boolean).length === 3 && !menuLoading && (
+                <button className="btn btn-ghost" onClick={() => generateMenu()}>🔄 重新生成菜单</button>
+              )}
             </div>
           </>
         )}

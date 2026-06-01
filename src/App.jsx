@@ -119,6 +119,8 @@ const css = `
   .dish-check { position: absolute; top: 10px; right: 10px; width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--border); background: var(--surf); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s; z-index: 2; font-size: 12px; color: transparent; }
   .dish-check:hover { border-color: var(--green); }
   .dish-check.on { background: var(--green); border-color: var(--green); color: #fff; }
+  /* Hide the front checkbox once flipped so it can't bleed through onto the back header (iOS backface bug) */
+  .flip-wrap.flipped .dish-check { opacity: 0; pointer-events: none; }
 
   /* Skel */
   .skel { background: linear-gradient(90deg, var(--surf2) 25%, var(--border) 50%, var(--surf2) 75%); background-size: 200% 100%; animation: skel-shine 1.2s infinite; border-radius: 4px; }
@@ -127,7 +129,7 @@ const css = `
   /* Back */
   .flip-back { background: var(--surf2); transform: rotateY(180deg); display: flex; flex-direction: column; }
   .flip-back-hdr { background: var(--acc); padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  .flip-back-name { font-family: 'Playfair Display', serif; font-size: .9rem; color: #fff; }
+  .flip-back-name { font-family: 'Playfair Display', serif; font-size: .9rem; color: #fff; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 10px; }
   .flip-back-close { background: rgba(255,255,255,.2); border: none; color: #fff; font-size: 16px; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; flex-shrink: 0; }
   .flip-back-body { flex: 1; overflow-y: auto; min-height: 0; padding: 10px 14px 16px; }
   .back-label { font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--acc); margin-bottom: 5px; }
@@ -296,50 +298,60 @@ function FlipCard({ dish, selected, onSelect }) {
   const cleanStepLine = (l) =>
     l.replace(/^\s*[-*•]?\s*(?:步骤)?\s*\d+\s*[\.\)、:：]?\s*/, "").trim();
 
-  const handleFlip = async (e) => {
-    if (e.target.closest(".dish-check")) return;
-    const next = !flipped;
-    setFlipped(next);
-    if (next && !fetchedRef.current) {
-      fetchedRef.current = true;
-      setStepsLoading(true);
-      setStepsError("");
-      try {
-        // Ask for one step per line (instead of a JSON array) so we can render
-        // each completed line the moment it streams in — the user sees steps
-        // appear progressively within ~1–2s instead of waiting for the whole
-        // response. This is the main fix for the slow flip-to-steps loading.
-        const prompt = `为川渝菜「${dish.name}」生成备餐步骤。
+  const loadSteps = useCallback(async () => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    setStepsLoading(true);
+    setStepsError("");
+    try {
+      // Ask for one step per line (instead of a JSON array) so we can render
+      // each completed line the moment it streams in — the user sees steps
+      // appear progressively within ~1–2s instead of waiting for the whole
+      // response. This is the main fix for the slow flip-to-steps loading.
+      const prompt = `为川渝菜「${dish.name}」生成备餐步骤。
 食材：${(dish.ingredients||[]).map(i=>`${i.name} ${i.amount}`).join("、")}
 设备：${dish.device}，份量：${dish.servings || "12人份"}
 要求：5-7步，每步单独一行并以序号开头（如"1. ..."），含°F/lb/cup等美制单位，最后一步为分装冷冻保存。只输出步骤行，不要标题或其他文字。`;
 
-        let committed = 0;
-        const raw = await callClaude([{ role:"user", content:prompt }], (full) => {
-          // Only commit lines already terminated by a newline, so the
-          // half-streamed final line doesn't flicker in and out.
-          const done = full.split("\n").slice(0, -1).map(cleanStepLine).filter(l => l.length > 3);
-          if (done.length > committed) {
-            committed = done.length;
-            setSteps(done);
-            setStepsLoading(false); // first step is visible → drop the spinner
-          }
-        }, 1200);
-
-        // Final flush: the last line has no trailing newline once streaming ends.
-        let finalSteps = raw.split("\n").map(cleanStepLine).filter(l => l.length > 3);
-        if (!finalSteps.length) {
-          const arr = extractJSON(raw); // tolerate a JSON-array style reply
-          if (Array.isArray(arr) && arr.length) finalSteps = arr;
+      let committed = 0;
+      const raw = await callClaude([{ role:"user", content:prompt }], (full) => {
+        // Only commit lines already terminated by a newline, so the
+        // half-streamed final line doesn't flicker in and out.
+        const done = full.split("\n").slice(0, -1).map(cleanStepLine).filter(l => l.length > 3);
+        if (done.length > committed) {
+          committed = done.length;
+          setSteps(done);
+          setStepsLoading(false); // first step is visible → drop the spinner
         }
-        if (finalSteps.length) setSteps(finalSteps);
-        else setStepsError("步骤生成失败，请关闭后重试");
-      } catch (err) {
-        setStepsError(err.message || "步骤加载失败，请重试");
-        fetchedRef.current = false; // allow a retry on next flip
+      }, 1200);
+
+      // Final flush: the last line has no trailing newline once streaming ends.
+      let finalSteps = raw.split("\n").map(cleanStepLine).filter(l => l.length > 3);
+      if (!finalSteps.length) {
+        const arr = extractJSON(raw); // tolerate a JSON-array style reply
+        if (Array.isArray(arr) && arr.length) finalSteps = arr.filter(x => typeof x === "string" && x.trim());
       }
-      finally { setStepsLoading(false); }
-    }
+      if (finalSteps.length) { setSteps(finalSteps); setStepsError(""); }
+      else { setStepsError("步骤生成失败，点击下方重试"); fetchedRef.current = false; }
+    } catch (err) {
+      // Network error / rate-limit / server overload — keep the card retryable.
+      setStepsError(err.message ? `加载失败：${err.message}` : "加载失败，点击下方重试");
+      fetchedRef.current = false;
+    } finally { setStepsLoading(false); }
+  }, [dish]);
+
+  const retrySteps = (e) => {
+    e.stopPropagation();
+    fetchedRef.current = false;
+    setSteps([]);
+    loadSteps();
+  };
+
+  const handleFlip = (e) => {
+    if (e.target.closest(".dish-check")) return;
+    const next = !flipped;
+    setFlipped(next);
+    if (next && !fetchedRef.current && steps.length === 0) loadSteps();
   };
 
   return (
@@ -390,7 +402,11 @@ function FlipCard({ dish, selected, onSelect }) {
               </div>
             ))}
             {stepsError && !stepsLoading && steps.length === 0 && (
-              <div className="error" style={{ marginTop:4 }}>❌ {stepsError}</div>
+              <div style={{ marginTop:4 }}>
+                <div className="error">❌ {stepsError}</div>
+                <button className="btn btn-ghost" style={{ marginTop:10, width:"100%", justifyContent:"center" }}
+                  onClick={retrySteps}>🔄 重新加载做法</button>
+              </div>
             )}
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { lookupRecipe, RECIPE_NAMES } from "./recipes";
+import { lookupRecipe } from "./recipes";
+import { buildMenuFromInventory, ingredientLabelMatches } from "./menuInventory";
 import { track } from "./analytics";
 import { shoppingLines, nextOccurrence, buildICS, downloadICS, WEEKDAYS } from "./appleSync";
 
@@ -117,6 +118,11 @@ const css = `
   .ing-row-f { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.8; }
   .ing-row-f:last-child { border-bottom: none; }
   .ing-name { color: var(--text); } .ing-amt { color: var(--gold); font-weight: 500; }
+  .ing-row-f.missing .ing-name { color: var(--red); }
+  .inv-status { margin: 0 14px 8px; padding: 8px 10px; border-radius: 8px; font-size: 11px; line-height: 1.5; }
+  .inv-status.ok { background: rgba(58,157,93,.12); border: 1px solid rgba(58,157,93,.28); color: var(--acc2); }
+  .inv-status.warn { background: rgba(176,125,34,.1); border: 1px solid rgba(176,125,34,.35); color: var(--gold); }
+  .inv-missing-list { margin-top: 4px; font-weight: 500; }
   .flip-hint { padding: 6px 14px; font-size: 10px; color: var(--muted); text-align: right; border-top: 1px solid var(--border); flex-shrink: 0; }
 
   /* Favorite (收藏) toggle */
@@ -340,12 +346,24 @@ function FlipCard({ dish, favorited, onToggleFavorite }) {
             </div>
           </div>
           <div className="flip-body">
-            {(dish.ingredients||[]).map((ing,i) => (
-              <div key={i} className="ing-row-f">
-                <span className="ing-name">{ing.name}</span>
-                {ing.amount && <span className="ing-amt">{ing.amount}</span>}
+            {dish.inventoryComplete === false && (dish.missingIngredients?.length > 0) && (
+              <div className={`inv-status warn`}>
+                <div>⚠ 系统推荐（库存未凑齐）</div>
+                <div className="inv-missing-list">缺少：{dish.missingIngredients.map(m => m.name).join("、")}</div>
               </div>
-            ))}
+            )}
+            {dish.inventoryComplete !== false && (
+              <div className="inv-status ok">✓ 库存可完整制作</div>
+            )}
+            {(dish.ingredients||[]).map((ing,i) => {
+              const miss = dish.missingIngredients?.some(m => ingredientLabelMatches(ing.name, m.name));
+              return (
+                <div key={i} className={`ing-row-f${miss ? " missing" : ""}`}>
+                  <span className="ing-name">{ing.name}{miss ? "（缺）" : ""}</span>
+                  {ing.amount && <span className="ing-amt">{ing.amount}</span>}
+                </div>
+              );
+            })}
           </div>
           <div className="flip-hint">{recipe ? "点击查看做法 ↗" : "📖 暂无做法记录"}</div>
         </div>
@@ -516,6 +534,7 @@ export default function App() {
   const [menuLoading, setMenuLoading] = useState(false);
   const [menuDone,    setMenuDone]    = useState(false);
   const [menuError,   setMenuError]   = useState("");
+  const [menuNotice,  setMenuNotice]  = useState("");
   const [dishes,      setDishes]      = useState([]);   // length-3 array; null = loading slot
 
   // Preference memory (in-session): 收藏的菜名，提高后续推送频率
@@ -625,89 +644,48 @@ export default function App() {
     setReceiptChecked({});
   };
 
-  // ── Generate menu: single streaming request, fill slots as each line arrives
-  const generateMenu = useCallback(async () => {
+  // ── Generate menu: hard inventory match against recipes.js (no AI)
+  const generateMenu = useCallback(() => {
     const startedAt = Date.now();
     track("menu_generate_started", { ingredient_count: ingCount, favorites_count: favorites.length });
     setMenuLoading(true);
     setMenuDone(false);
     setMenuError("");
+    setMenuNotice("");
 
-    // Always regenerate all slots from scratch (count driven by user setting).
     const needCount = Math.max(1, Number(settings.dishCount) || 3);
-    const emptySlots = Array.from({ length: needCount }, (_, i) => i);
     setDishes(Array(needCount).fill(null));
 
-    const prefCtx = favorites.length
-      ? `用户收藏的菜（请显著提高推送频率，在库存允许时尽量优先安排其中的菜）：${favorites.slice(-12).join("、")}`
-      : "";
-
-    const cuisineCtx = settings.cuisine && settings.cuisine !== "不限"
-      ? `偏好菜系：${settings.cuisine}。` : "";
-
-    const prompt = `根据食材库存规划备餐，只输出 ${needCount} 行JSON，每行一道菜，不要任何其他文字。
-${cuisineCtx}${prefCtx ? `偏好约束：${prefCtx}` : ""}
-【食材库存】${ingStr || "（无）"}
-
-【已收录做法的菜品】${RECIPE_NAMES.join("、")}
-要求：在库存食材允许的前提下，尽量从上面【已收录做法的菜品】中选择，菜名需与列表完全一致；只有当库存确实无法做出列表中任何菜时，才另选其他菜。
-
-每行格式（单行紧凑JSON）：
-{"name":"水煮牛肉","name_en":"Sichuan Boiled Beef","device":"炒锅","time":"约30分钟","servings":"${settings.servings}人份","ingredients":[{"name":"牛里脊","amount":"2.5 lbs"},{"name":"郫县豆瓣酱","amount":"3 tbsp"}]}
-
-规则：忌口（${settings.restrictions?.trim() || "无"}），按 ${settings.servings} 人份用量，只用库存食材，用量用美制单位，每行必须是完整合法JSON。`;
-
-    try {
-      let buf = "";
-      let filledCount = 0;
-      const filledNames = new Set();
-
-      const fillSlot = (obj) => {
-        if (!obj || !obj.name || filledNames.has(obj.name)) return;
-        const slotIdx = emptySlots[filledCount];
-        if (slotIdx === undefined) return;
-        filledNames.add(obj.name);
-        filledCount++;
-        setDishes(prev => {
-          const next = [...prev];
-          next[slotIdx] = obj;
-          return next;
-        });
-      };
-
-      await callClaude([{ role:"user", content:prompt }], (full) => {
-        buf = full;
-        // Check each line for a complete dish JSON. The model sometimes wraps
-        // dishes in a pretty-printed array, so tolerate a trailing comma.
-        for (const line of buf.split("\n")) {
-          const t = line.trim().replace(/,\s*$/, "");
-          if (!t.startsWith("{") || !t.endsWith("}")) continue;
-          try { fillSlot(JSON.parse(t)); } catch {}
+    window.setTimeout(() => {
+      try {
+        const { dishes: built, fallbackMode, message } = buildMenuFromInventory(
+          ings, settings, favorites, needCount
+        );
+        if (built.length < needCount) {
+          setMenuError(
+            built.length === 0
+              ? "没有可推荐的菜谱，请补充食材或调整忌口/菜系设置。"
+              : `仅匹配到 ${built.length} 道菜（已设置 ${needCount} 道），请补充库存或调低菜品数。`
+          );
         }
-      }, 1800, buildSystem(settings));
-
-      // Fallback: if line-by-line streaming missed dishes (e.g. the model
-      // returned a fenced/pretty-printed JSON array instead of one dish per
-      // line), parse the full buffer once and fill any still-empty slots.
-      if (filledCount < needCount) {
-        const parsed = extractJSON(buf);
-        const arr = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
-        for (const obj of arr) fillSlot(obj);
+        const padded = [...built];
+        while (padded.length < needCount) padded.push(null);
+        setDishes(padded.slice(0, needCount));
+        setMenuNotice(message);
+        track("menu_generated", {
+          dishes_count: built.length,
+          fallback_mode: fallbackMode,
+          duration_ms: Date.now() - startedAt,
+        });
+      } catch (e) {
+        track("menu_generate_failed", { message: e.message });
+        setMenuError(e.message);
+      } finally {
+        setMenuLoading(false);
+        setMenuDone(true);
       }
-
-      track("menu_generated", {
-        dishes_count: filledCount,
-        duration_ms: Date.now() - startedAt,
-      });
-
-    } catch(e) {
-      track("menu_generate_failed", { message: e.message });
-      setMenuError(e.message);
-    } finally {
-      setMenuLoading(false);
-      setMenuDone(true);
-    }
-  }, [ingStr, favorites, settings]);
+    }, 80);
+  }, [ings, favorites, settings, ingCount]);
 
   // ── Confirm this week's menu and move on to shopping
   const confirmMenu = () => {
@@ -961,11 +939,16 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市�
                 </div>
               )}
 
+              {menuNotice && (
+                <div style={{ fontSize:12, color:"var(--gold)", marginBottom:12, padding:"10px 12px", background:"rgba(176,125,34,.08)", borderRadius:8, border:"1px solid rgba(176,125,34,.25)" }}>
+                  {menuNotice}
+                </div>
+              )}
               {menuError && <div className="error">❌ {menuError}</div>}
 
               {menuLoading && dishes.length === 0 && (
                 <div style={{ display:"flex", alignItems:"center", gap:10, padding:"24px 0", justifyContent:"center" }}>
-                  <div className="spinner"/><div className="load-txt">正在生成菜单...</div>
+                  <div className="spinner"/><div className="load-txt">正在根据库存匹配菜谱...</div>
                 </div>
               )}
             </div>

@@ -1,7 +1,9 @@
 // Node.js serverless runtime (reliably loads .env.local in `vercel dev`, supports streaming).
 
 // Gemini model to use. Override via env var GEMINI_MODEL if needed.
-const MODEL = "gemini-2.5-flash";
+// flash-lite has a far more generous free tier (15 RPM / 1000 RPD vs flash's
+// 10 RPM / 250 RPD), which is the main lever against 429 rate-limit errors.
+const MODEL = "gemini-2.5-flash-lite";
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -69,11 +71,13 @@ export default async function handler(req, res) {
   const payload = JSON.stringify(toGeminiBody(reqBody));
 
   // Gemini's free tier enforces a low requests-per-minute quota, so bursts of
-  // calls (menu + prep-notes + step lookups) can return 429. Retry transient
-  // 429/503 with exponential backoff, honoring the upstream Retry-After hint,
-  // so the client doesn't see a hard failure for a momentary rate limit.
+  // calls can return 429. Retry transient 429/503 with exponential backoff,
+  // honoring the upstream Retry-After hint, so the client doesn't see a hard
+  // failure for a momentary rate limit. Kept low (2) on purpose: each retry is
+  // itself a billable request against the per-minute quota, so retrying too
+  // aggressively burns the budget and makes 429s more likely, not less.
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const MAX_ATTEMPTS = 4;
+  const MAX_ATTEMPTS = 2;
   let upstream;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     upstream = await fetch(url, {

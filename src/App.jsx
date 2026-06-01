@@ -145,10 +145,6 @@ const css = `
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  /* Prep notes */
-  .prep-notes { display: flex; flex-direction: column; gap: 6px; }
-  .prep-note { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; padding: 8px 10px; background: var(--surf2); border-radius: 7px; border-left: 3px solid var(--gold); line-height: 1.5; }
-
   /* Confirm bar */
   .confirm-bar { background: var(--surf2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .confirm-bar-info { font-size: 12px; color: var(--muted); line-height: 1.5; }
@@ -466,7 +462,6 @@ export default function App() {
   const [menuDone,    setMenuDone]    = useState(false);
   const [menuError,   setMenuError]   = useState("");
   const [dishes,      setDishes]      = useState([]);   // length-3 array; null = loading slot
-  const [prepNotes,   setPrepNotes]   = useState([]);
 
   // Preference memory (in-session): 收藏的菜名，提高后续推送频率
   const [favorites, setFavorites] = useState(prefStore.favorites);
@@ -578,7 +573,6 @@ export default function App() {
     setMenuLoading(true);
     setMenuDone(false);
     setMenuError("");
-    setPrepNotes([]);
 
     // Always regenerate all three slots from scratch.
     setDishes([null, null, null]);
@@ -643,23 +637,6 @@ ${prefCtx ? `偏好约束：${prefCtx}` : ""}
         dishes_count: filledCount,
         duration_ms: Date.now() - startedAt,
       });
-
-      // After dishes done, fetch prep notes (non-blocking, don't await for UX)
-      const allNames = Array.from(filledNames);
-      if (allNames.length > 0) {
-        callClaude([{ role:"user", content:
-          `针对菜肴「${allNames.join("、")}」，列出备餐前必须提前做的操作（只写：解冻/泡血水/腌制/预热烤箱），若无则返回[]。
-只返回JSON数组，每条≤12字：[{"icon":"❄️","text":"牛肉提前12h解冻"}]` }],
-        null, 300).then(raw => {
-          const as = raw.indexOf("["), ae = raw.lastIndexOf("]");
-          if (as !== -1 && ae > as) {
-            try {
-              const arr = JSON.parse(raw.slice(as, ae+1));
-              if (Array.isArray(arr)) setPrepNotes(arr.filter(n => n.icon && n.text));
-            } catch {}
-          }
-        }).catch(() => {});
-      }
 
     } catch(e) {
       track("menu_generate_failed", { message: e.message });
@@ -891,20 +868,6 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
                 </div>
               )}
             </div>
-
-            {/* Prep notes */}
-            {prepNotes.length > 0 && (
-              <div className="card">
-                <div className="card-title"><span className="ico">📋</span>备餐前注意</div>
-                <div className="prep-notes">
-                  {prepNotes.map((n,i) => (
-                    <div key={i} className="prep-note">
-                      <span style={{ fontSize:14 }}>{n.icon}</span><span>{n.text}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Confirm bar — only show when all 3 dishes loaded */}
             {dishes.filter(Boolean).length === 3 && !menuLoading && (

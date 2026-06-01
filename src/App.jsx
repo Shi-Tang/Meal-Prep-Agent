@@ -434,6 +434,33 @@ export default function App() {
 
   // ── Receipt photo scan
   const fileRef = useRef();
+
+  // Downscale + re-encode to JPEG in the browser before upload. Phone photos
+  // are often several MB (and sometimes HEIC); a raw base64 upload can exceed
+  // Vercel's 4.5MB request-body limit and silently fail. This normalizes the
+  // format and keeps the payload small + fast.
+  const fileToCompressedJpeg = (file, maxDim = 1600, quality = 0.8) =>
+    new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("无法读取这张图片（可能是 HEIC 等格式），请换成 JPG/PNG 再试"));
+      };
+      img.src = url;
+    });
+
   const scanReceipt = async (file) => {
     if (!file) return;
     setReceiptLoading(true);
@@ -442,13 +469,8 @@ export default function App() {
     setReceiptChecked({});
     setReceiptCats({});
     try {
-      const b64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = rej;
-        r.readAsDataURL(file);
-      });
-      const mediaType = file.type || "image/jpeg";
+      const b64 = await fileToCompressedJpeg(file);
+      const mediaType = "image/jpeg";
       const raw = await callClaude([{
         role: "user",
         content: [
@@ -699,7 +721,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊川渝调料去中超。推�
             <div className="card">
               <div className="card-title"><span className="ico">🧾</span>拍照导入小票</div>
               <div className="upload-zone" onClick={() => fileRef.current?.click()}>
-                <input ref={fileRef} type="file" accept="image/*" onChange={e => scanReceipt(e.target.files[0])} />
+                <input ref={fileRef} type="file" accept="image/*" onChange={e => { const f = e.target.files[0]; e.target.value = ""; scanReceipt(f); }} />
                 {receiptLoading
                   ? <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:10 }}>
                       <div className="spinner" /><div className="load-txt">正在识别小票...</div>

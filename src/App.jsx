@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { lookupRecipe } from "./recipes";
 import { normalizeInventoryName } from "./ingredientCanon";
 import { buildMenuFromInventory, displayRowIsMissing } from "./menuInventory";
+import { buildShoppingFromDishes } from "./shoppingList";
 import { track } from "./analytics";
 import { shoppingLines, nextOccurrence, buildICS, downloadICS, WEEKDAYS } from "./appleSync";
 
@@ -163,7 +164,6 @@ const css = `
   .pref-chip.dislike { background: rgba(200,74,55,.12); color: #b03a28; }
 
   /* Shopping */
-  .shop-store-badge { display: inline-flex; align-items: center; gap: 8px; background: var(--acc); color: #fff; border-radius: 8px; padding: 8px 16px; font-family: 'Playfair Display', serif; font-size: 1rem; margin-bottom: 18px; }
   .shop-cat { margin-bottom: 16px; }
   .shop-cat-hdr { display: flex; align-items: center; gap: 6px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); font-weight: 500; padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
   .shop-item { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; transition: opacity .2s; }
@@ -183,7 +183,6 @@ const css = `
   .progress-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
   .progress-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width .3s; }
   .progress-txt { font-size: 11px; color: var(--muted); flex-shrink: 0; }
-  .asian-hdr { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); padding: 8px 0 6px; border-top: 1px solid var(--border); margin-top: 16px; margin-bottom: 2px; }
 
   /* ── Phone adaptive (iPhone 15 Pro ≈ 393px and similar) ── */
   @media (max-width: 480px) {
@@ -217,7 +216,6 @@ const css = `
     input, select { font-size: 14px; }
     .btn { font-size: 13px; padding: 10px 14px; }
     .confirm-bar { padding: 12px 13px; }
-    .shop-store-badge { font-size: .9rem; padding: 7px 13px; }
     .shop-cn { font-size: 14px; }
   }
 `;
@@ -413,7 +411,6 @@ function IphoneSync({ data }) {
   const [time, setTime] = useState("10:00"); // 默认上午 10 点
 
   const lines = shoppingLines(data);
-  const storeName = data?.store_name || "超市";
 
   const computeStart = () => {
     const [h, m] = time.split(":").map(Number);
@@ -422,9 +419,9 @@ function IphoneSync({ data }) {
 
   const handleCalendar = () => {
     const start = computeStart();
-    const ics = buildICS({ storeName, lines, start });
-    downloadICS(ics, `去${storeName}购物.ics`);
-    track("sync_calendar_ics", { store: storeName, items: lines.length, day, time });
+    const ics = buildICS({ lines, start });
+    downloadICS(ics);
+    track("sync_calendar_ics", { items: lines.length, day, time });
   };
 
   const startPreview = computeStart();
@@ -449,7 +446,7 @@ function IphoneSync({ data }) {
         📅 加入日历
       </button>
       <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
-        点击后 iPhone 会用「日历」打开，自动创建「去{storeName}购物」日程，采购清单写在日程备注里，提前 1 小时提醒。
+        点击后 iPhone 会用「日历」打开，自动创建「备餐采购」日程，清单写在备注里，提前 1 小时提醒。
       </div>
     </div>
   );
@@ -460,10 +457,9 @@ function ShoppingList({ data, onConfirmPurchase }) {
   const [checked, setChecked]   = useState({});
   const [confirmed, setConfirmed] = useState(false);
   if (!data) return null;
-  const allFlat = [
-    ...(data.main_store_items||[]).flatMap((cat,ci) => (cat.items||[]).map((item,ii) => ({ key:`m-${ci}-${ii}`, item }))),
-    ...(data.asian_store_items||[]).map((item,ii) => ({ key:`a-${ii}`, item })),
-  ];
+  const allFlat = (data.categories || []).flatMap((cat, ci) =>
+    (cat.items || []).map((item, ii) => ({ key: `m-${ci}-${ii}`, item }))
+  );
   const total = allFlat.length;
   const doneCount = allFlat.filter(({key}) => !!checked[key]).length;
   const toggle = key => setChecked(p => ({ ...p, [key]: !p[key] }));
@@ -476,6 +472,7 @@ function ShoppingList({ data, onConfirmPurchase }) {
         <div className="shop-names">
           <div className="shop-cn">{item.name_cn}{item.low_stock && <span className="shop-warn">⚠ 库存预警</span>}</div>
           {item.name_en && <div className="shop-en">{item.name_en}</div>}
+          {item.for_dishes && <div className="shop-en" style={{ fontStyle:"normal", opacity:.85 }}>用于：{item.for_dishes}</div>}
         </div>
         <div className="shop-qty">{item.qty_display || item.qty}</div>
       </div>
@@ -483,23 +480,21 @@ function ShoppingList({ data, onConfirmPurchase }) {
   };
   return (
     <div>
-      {data.store_name && <div className="shop-store-badge">🏪 {data.store_name}</div>}
+      {data.emptyMessage && (
+        <div style={{ textAlign:"center", padding:"28px 16px", color:"var(--muted)", fontSize:13 }}>
+          {data.emptyMessage}
+        </div>
+      )}
       <div className="shop-progress">
         <div className="progress-bar"><div className="progress-fill" style={{ width: total ? `${(doneCount/total)*100}%` : "0%" }} /></div>
         <div className="progress-txt">{doneCount} / {total} 已购</div>
       </div>
-      {(data.main_store_items||[]).map((cat,ci) => cat.items?.length > 0 && (
+      {(data.categories || []).map((cat, ci) => cat.items?.length > 0 && (
         <div key={ci} className="shop-cat">
           <div className="shop-cat-hdr">{cat.icon} {cat.category}</div>
-          {cat.items.map((item,ii) => renderItem({ key:`m-${ci}-${ii}`, item }))}
+          {cat.items.map((item, ii) => renderItem({ key: `m-${ci}-${ii}`, item }))}
         </div>
       ))}
-      {data.asian_store_items?.length > 0 && (
-        <div>
-          <div className="asian-hdr">🏮 亚洲超市单独购买</div>
-          {data.asian_store_items.map((item,ii) => renderItem({ key:`a-${ii}`, item }))}
-        </div>
-      )}
       {!confirmed && doneCount > 0 && (
         <div style={{ marginTop:20, paddingTop:14, borderTop:"1px solid var(--border)" }}>
           <button className="btn btn-primary" style={{ width:"100%", justifyContent:"center", padding:"11px" }} onClick={handleConfirm}>
@@ -725,43 +720,28 @@ export default function App() {
     generateShopping();
   };
 
-  // ── Generate shopping list
-  const generateShopping = useCallback(async () => {
+  // ── Generate shopping list from Step 2 missing ingredients (no AI)
+  const generateShopping = useCallback(() => {
     track("shopping_generate_started");
-    setShopLoading(true); setShopError(""); setShopData(null);
-    try {
-      const dishSummary = dishes.map(d => `${d.name}：${(d.ingredients||[]).map(i=>`${i.name} ${i.amount}`).join("、")}`).join("\n");
-      const prompt = `为下周备餐生成超市采购建议，只返回JSON，不要其他文字。
-
-【本周菜单消耗】
-${dishSummary}
-
-【当前剩余库存】
-${ingStr || "（已清空）"}
-
-\`\`\`json
-{
-  "store_name": "Whole Foods",
-  "main_store_items": [
-    {"category":"肉类","icon":"🥩","items":[{"name_cn":"牛里脊","name_en":"Beef Tenderloin","qty_display":"2.5 lbs","qty":2.5,"unit":"lb","cat":"肉类","low_stock":false}]},
-    {"category":"蔬菜 & 豆制品","icon":"🥦","items":[]},
-    {"category":"碳水 & 干货","icon":"🌾","items":[]},
-    {"category":"调料补充","icon":"🧂","items":[{"name_cn":"郫县豆瓣酱","name_en":"Doubanjiang","qty_display":"1瓶","qty":1,"unit":"瓶","cat":"调料","low_stock":true}]}
-  ],
-  "asian_store_items":[{"name_cn":"花椒","name_en":"Sichuan Peppercorn","qty_display":"1包(2oz)","qty":56,"unit":"g","cat":"调料"}]
-}
-\`\`\`
-
-Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市。推荐覆盖最广的一家。`;
-      let raw = "";
-      await callClaude([{ role:"user", content:prompt }], t => { raw = t; }, 3000, buildSystem(settings));
-      const parsed = extractJSON(raw);
-      if (!parsed) throw new Error("解析失败，请重试");
-      track("shopping_generated", { store: parsed.store_name });
-      setShopData(parsed);
-    }     catch(e) { track("shopping_generate_failed", { message: e.message }); setShopError(e.message); }
-    finally { setShopLoading(false); }
-  }, [ingStr, dishes, settings]);
+    setShopLoading(true);
+    setShopError("");
+    setShopData(null);
+    window.setTimeout(() => {
+      try {
+        const confirmed = dishes.filter(Boolean);
+        const data = buildShoppingFromDishes(confirmed);
+        track("shopping_generated", {
+          items: (data.categories || []).reduce((n, c) => n + (c.items?.length || 0), 0),
+        });
+        setShopData(data);
+      } catch (e) {
+        track("shopping_generate_failed", { message: e.message });
+        setShopError(e.message);
+      } finally {
+        setShopLoading(false);
+      }
+    }, 40);
+  }, [dishes]);
 
   // ── Confirm purchase
   const confirmPurchase = useCallback((purchasedItems) => {
@@ -771,7 +751,7 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市�
       const nextIdRef = { v: Math.max(...prev.map((r) => r.id), nid) + 1 };
       purchasedItems.forEach((item) => {
         mergeCanonRow(updated, {
-          name: item.name_cn,
+          name: item.shop_canon || item.name_cn,
           qty: item.qty,
           unit: item.unit || "个",
           cat: item.cat || "其他",
@@ -1009,13 +989,13 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市�
         {step === 2 && (
           <>
             <div className="card">
-              <div className="card-title"><span className="ico">🛒</span>下周采购清单</div>
+              <div className="card-title"><span className="ico">🛒</span>补货清单</div>
               <div style={{ fontSize:12, color:"var(--muted)", marginBottom:16, padding:"8px 12px", background:"var(--surf2)", borderRadius:7, borderLeft:"3px solid var(--acc)" }}>
-                基于本周菜单消耗推算，购买完成后可一键更新库存
+                由 Step 2 菜单中标注的「缺少食材」自动汇总，无需 AI 推算。购买完成后可一键写回库存。
               </div>
               {shopLoading && (
                 <div style={{ display:"flex", alignItems:"center", gap:10, padding:"24px 0", justifyContent:"center" }}>
-                  <div className="spinner"/><div className="load-txt">生成下周采购清单...</div>
+                  <div className="spinner"/><div className="load-txt">正在汇总缺料清单...</div>
                 </div>
               )}
               {shopData && <ShoppingList data={shopData} onConfirmPurchase={(items) => { confirmPurchase(items); setStep(0); }} />}

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { lookupRecipe } from "./recipes";
-import { buildMenuFromInventory, ingredientLabelMatches } from "./menuInventory";
+import { normalizeInventoryName } from "./ingredientCanon";
+import { buildMenuFromInventory, displayRowIsMissing } from "./menuInventory";
 import { track } from "./analytics";
 import { shoppingLines, nextOccurrence, buildICS, downloadICS, WEEKDAYS } from "./appleSync";
 
@@ -356,7 +357,8 @@ function FlipCard({ dish, favorited, onToggleFavorite }) {
               <div className="inv-status ok">✓ 库存可完整制作</div>
             )}
             {(dish.ingredients||[]).map((ing,i) => {
-              const miss = dish.missingIngredients?.some(m => ingredientLabelMatches(ing.name, m.name));
+              const miss = dish.inventoryComplete === false &&
+                displayRowIsMissing(ing.name, dish.missingGroups || []);
               return (
                 <div key={i} className={`ing-row-f${miss ? " missing" : ""}`}>
                   <span className="ing-name">{ing.name}{miss ? "（缺）" : ""}</span>
@@ -597,11 +599,24 @@ export default function App() {
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
           { type: "text", text: `识别这张超市小票中的所有食材和商品，只返回JSON数组，不要其他文字。
-每项格式：{"name":"商品名","qty":数量数字,"unit":"单位","cat":"肉类/蔬菜/碳水/蛋奶/调料/其他"}
-商品名语言规则（严格遵守，按小票上该商品的实际显示语言）：
-- 该商品在小票上只用英文显示 → name 用英文（保持小票原文，可适当规范大小写）
-- 该商品在小票上只用中文显示 → name 用中文
-- 该商品在小票上同时有中英文（双语）→ name 用中文
+每项格式：{"name":"规范中文食材名","qty":数量数字,"unit":"单位","cat":"肉类/蔬菜/碳水/蛋奶/调料/其他"}
+
+【名称规则 — 必须遵守】
+1. name 一律使用简体中文规范食材名，无论小票原文是英文、中文或双语。
+2. 只保留食材类别与部位，去掉品牌、规格、包装描述（如 Organic / 1lb pack / Family Size）。
+3. 英文小票须先理解再翻译，例如：
+   - chicken thigh / boneless leg → 鸡腿
+   - chicken breast → 鸡胸
+   - ground pork → 猪绞肉
+   - beef brisket → 牛腩
+   - beef shank → 牛腱
+   - all-purpose flour → 面粉
+   - spaghetti / pasta → 意面
+   - soy sauce → 生抽
+   - doubanjiang → 豆瓣酱
+4. 不同部位不要合并：鸡胸≠鸡腿，牛腩≠牛腱，猪里脊≠五花肉。
+5. 过于笼统且无法对应具体食材的词（如 seasoning mix、assorted spices）可记为「复合调料」。
+
 单位从以下选：lb/oz/个/包/瓶/ml/L/cup/g/kg/片/根/头/束/盒/块
 如果看不清数量就默认1，单位根据商品合理推断，非食品类商品忽略。` }
         ]
@@ -622,22 +637,38 @@ export default function App() {
     }
   };
 
+  const canonIngRow = (row) => ({ ...row, name: normalizeInventoryName(row.name) });
+
+  const mergeCanonRow = (updated, item, nextIdRef) => {
+    const canonName = normalizeInventoryName(item.name);
+    if (!canonName) return;
+    const idx = updated.findIndex((r) => normalizeInventoryName(r.name) === canonName);
+    if (idx !== -1) {
+      updated[idx] = {
+        ...updated[idx],
+        name: canonName,
+        qty: String(parseFloat(updated[idx].qty || 0) + (parseFloat(item.qty) || 1)),
+      };
+    } else {
+      updated.push({
+        id: nextIdRef.v++,
+        name: canonName,
+        qty: String(item.qty || 1),
+        unit: item.unit || "个",
+        cat: item.cat || "其他",
+      });
+    }
+  };
+
   const importReceipt = () => {
     const toAdd = receiptItems
       .filter((_, i) => receiptChecked[i])
       .map((item, i) => ({ ...item, cat: receiptCats[i] || item.cat || "其他" }));
     track("receipt_imported", { items_imported: toAdd.length });
-    setIngs(prev => {
-      let updated = [...prev];
-      let nextId = Math.max(...prev.map(r => r.id), nid) + 1;
-      toAdd.forEach(item => {
-        const idx = updated.findIndex(r => r.name.trim() === item.name.trim());
-        if (idx !== -1) {
-          updated[idx] = { ...updated[idx], qty: String(parseFloat(updated[idx].qty||0) + (parseFloat(item.qty)||1)) };
-        } else {
-          updated.push({ id: nextId++, name: item.name, qty: String(item.qty||1), unit: item.unit||"个", cat: item.cat||"其他" });
-        }
-      });
+    setIngs((prev) => {
+      const updated = prev.map(canonIngRow);
+      const nextIdRef = { v: Math.max(...prev.map((r) => r.id), nid) + 1 };
+      toAdd.forEach((item) => mergeCanonRow(updated, item, nextIdRef));
       return updated;
     });
     setReceiptItems([]);
@@ -658,20 +689,19 @@ export default function App() {
 
     window.setTimeout(() => {
       try {
+        const normalizedIngs = ings.map(canonIngRow);
+        if (normalizedIngs.some((r, i) => r.name !== ings[i].name)) setIngs(normalizedIngs);
+
         const { dishes: built, fallbackMode, message } = buildMenuFromInventory(
-          ings, settings, favorites, needCount
+          normalizedIngs, settings, favorites, needCount
         );
-        if (built.length < needCount) {
-          setMenuError(
-            built.length === 0
-              ? "没有可推荐的菜谱，请补充食材或调整忌口/菜系设置。"
-              : `仅匹配到 ${built.length} 道菜（已设置 ${needCount} 道），请补充库存或调低菜品数。`
-          );
-        }
-        const padded = [...built];
-        while (padded.length < needCount) padded.push(null);
-        setDishes(padded.slice(0, needCount));
+        setDishes(built);
         setMenuNotice(message);
+        if (built.length === 0) {
+          setMenuError("没有与当前库存匹配的菜谱。请补充规范中文食材（如鸡腿、牛腩、面粉、生抽）或调整菜系/忌口。");
+        } else if (built.length < needCount) {
+          setMenuError(`仅匹配到 ${built.length} 道菜（已设置 ${needCount} 道），请补充库存或调低菜品数。`);
+        }
         track("menu_generated", {
           dishes_count: built.length,
           fallback_mode: fallbackMode,
@@ -736,16 +766,16 @@ Whole Foods有豆瓣酱；TJ's肉类实惠；特殊亚洲调料去亚洲超市�
   // ── Confirm purchase
   const confirmPurchase = useCallback((purchasedItems) => {
     track("purchase_confirmed", { items_count: purchasedItems.length });
-    setIngs(prev => {
-      let updated = [...prev];
-      let nextId = Math.max(...prev.map(r => r.id), nid) + 1;
-      purchasedItems.forEach(item => {
-        const name = item.name_cn, qty = parseFloat(item.qty)||1, unit = item.unit||"个", cat = item.cat||"其他";
-        const idx = updated.findIndex(r => r.name.trim() === name.trim() || r.name.includes(name) || name.includes(r.name));
-        if (idx !== -1) {
-          const ex = updated[idx];
-          updated[idx] = { ...ex, qty: String(ex.unit === unit ? parseFloat(ex.qty||0)+qty : qty), unit };
-        } else { updated.push({ id: nextId++, name, qty: String(qty), unit, cat }); }
+    setIngs((prev) => {
+      const updated = prev.map(canonIngRow);
+      const nextIdRef = { v: Math.max(...prev.map((r) => r.id), nid) + 1 };
+      purchasedItems.forEach((item) => {
+        mergeCanonRow(updated, {
+          name: item.name_cn,
+          qty: item.qty,
+          unit: item.unit || "个",
+          cat: item.cat || "其他",
+        }, nextIdRef);
       });
       return updated;
     });

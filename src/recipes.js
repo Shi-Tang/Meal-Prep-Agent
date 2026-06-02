@@ -9,6 +9,9 @@
 //
 // 添加 / 修改：直接在 RECIPES 中增改即可。匹配时会忽略空格/括号/标点并支持部分包含
 // （例如 AI 生成「家常回锅肉」也能命中「回锅肉」）。
+//
+// 菜单匹配：ingredients / prep 会在运行时解析为「规范用料」（见 ingredientCanon.js），
+// 原文仍用于 flip 卡展示，不必把每条 ingredients 改成规范名。
 
 export const RECIPES = {
   "回锅肉": {
